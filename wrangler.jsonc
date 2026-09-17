@@ -16,6 +16,6 @@
   // Runs the cleanup job (auto-delete + broadcast drain) every minute —
   // same cadence as the old Deno.cron("cleanup", "* * * * *", ...).
   "triggers": {
-    "crons": ["* * * * *"]
+    "crons": ["*/5 * * * *"]
   }
 }
