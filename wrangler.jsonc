@@ -3,19 +3,12 @@
   "name": "file-store-bot",
   "main": "src/index.js",
   "compatibility_date": "2026-09-17",
-
-  // Run `npx wrangler kv namespace create BOT_KV` and paste the "id" it
-  // prints here (see SETUP.md, step 2).
-  "kv_namespaces": [
+  
+  "d1_databases": [
     {
-      "binding": "BOT_KV",
-      "id": "04c6aac4ad7443ff95b8e56278850cc4"
+      "binding": "DB",
+      "database_name": "bot_db",
+      "database_id": "bccc74dc-65a8-4ada-a79b-ecc00f49008d"
     }
-  ],
-
-  // Runs the cleanup job (auto-delete + broadcast drain) every minute —
-  // same cadence as the old Deno.cron("cleanup", "* * * * *", ...).
-  "triggers": {
-    "crons": ["*/5 * * * *"]
-  }
+  ]
 }
