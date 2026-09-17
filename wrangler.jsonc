@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "file-store-bot",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-17",
+
+  // Run `npx wrangler kv namespace create BOT_KV` and paste the "id" it
+  // prints here (see SETUP.md, step 2).
+  "kv_namespaces": [
+    {
+      "binding": "BOT_KV",
+      "id": "PASTE_YOUR_KV_NAMESPACE_ID_HERE"
+    }
+  ],
+
+  // Runs the cleanup job (auto-delete + broadcast drain) every minute —
+  // same cadence as the old Deno.cron("cleanup", "* * * * *", ...).
+  "triggers": {
+    "crons": ["* * * * *"]
+  }
+}
