@@ -31,6 +31,20 @@ export const MAX_BATCH_PER_REQUEST = 25; // how many files /getlink+/batch deliv
 export const DEFAULT_AUTODELETE_MIN = 10;
 export const DEFAULT_SHORTENER_MIN = 960; // 16h
 
+// ---------- Verify (hold-button) page ----------
+export const HOLD_SECONDS = 4;        // user must hold the button this long
+export const PASS_TTL_MIN = 15;       // shortener pass token validity
+export const MIN_SOLVE_SECONDS = 10;  // min gap between link creation and verified hold (blocks instant bypass bots)
+
+// Optional Cloudflare Turnstile (free). Both must be set to enable it.
+// wrangler secret put TURNSTILE_SITEKEY / TURNSTILE_SECRET
+export function getTurnstileSiteKey() {
+  return env("TURNSTILE_SITEKEY");
+}
+export function getTurnstileSecret() {
+  return env("TURNSTILE_SECRET");
+}
+
 // Max clones a NON-owner can create via the main bot (owners are unlimited)
 export const MAX_CLONES_PER_USER = 3;
 
