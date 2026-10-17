@@ -172,6 +172,14 @@ export async function deletePassToken(token) {
   await kvDelete(k("passes", token));
 }
 
+// One-shot throttle: returns true only the first time within ttlMinutes (used to avoid spamming admin).
+export async function claimNotice(botId, key, ttlMinutes = 10) {
+  const kk = k("notice", botId, key);
+  if (await kvGet(kk)) return false;
+  await kvPut(kk, { t: Date.now() }, ttlMinutes * 60);
+  return true;
+}
+
 export async function getState(botId, userId) {
   return await kvGet(k("states", botId, String(userId)));
 }
