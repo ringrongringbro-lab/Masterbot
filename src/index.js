@@ -3,11 +3,12 @@ import { getBotToken, getWebhookSecret } from "./config.js";
 import { handleMainBot } from "./mainbot.js";
 import { handleCloneBot } from "./storebot.js";
 import { runCleanupJob } from "./cron.js";
+import { handleVerifyPage, handleVerifyApi } from "./verify.js";
 
 const HOME_PAGE = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>File Store Bot</title></head>
  <body style="background:#121212;color:#fff;text-align:center;padding:50px;font-family:sans-serif">
- <h1 style="color:#0088cc">🚀 File Store Bot — Cloudflare Workers</h1>
- <p>Bot is LIVE ✅</p></body></html>`;
+ <h1 style="color:#0088cc">ðŸš€ File Store Bot â€” Cloudflare Workers</h1>
+ <p>Bot is LIVE âœ…</p></body></html>`;
 
 export default {
   async fetch(request, env, ctx) {
@@ -17,6 +18,10 @@ export default {
     if (url.pathname === "/") {
       return new Response(HOME_PAGE, { headers: { "Content-Type": "text/html" } });
     }
+
+    // Hold-button verification page (shortener bypass protection)
+    if (url.pathname === "/verify" && request.method === "GET") return handleVerifyPage(request);
+    if (url.pathname === "/verify/api" && request.method === "POST") return handleVerifyApi(request);
 
     if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
     if (!getBotToken()) return new Response("BOT_TOKEN not set", { status: 500 });
@@ -35,7 +40,7 @@ export default {
 
     // Telegram expects a fast response to the webhook. We hand the actual
     // update handling to ctx.waitUntil() so the Worker keeps running it in
-    // the background after the HTTP response below is already sent —
+    // the background after the HTTP response below is already sent â€”
     // matters most for slower paths like /broadcast, which can involve a
     // lot of sequential KV writes.
     const work = (async () => {
@@ -55,7 +60,7 @@ export default {
     return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
   },
 
-  // Registered via the `triggers.crons` entry in wrangler.jsonc — runs every
+  // Registered via the `triggers.crons` entry in wrangler.jsonc â€” runs every
   // minute, same cadence as the original Deno.cron("cleanup", "* * * * *", ...).
   async scheduled(controller, env, ctx) {
     setEnv(env);
