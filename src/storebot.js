@@ -136,8 +136,17 @@ async function cmdStart(msg, tg, botData, param, origin) {
     fromPass = true;
   }
 
-  const link = await unpackLink(payload);
-  if (!link) return tg.send(msg.chat.id, "❌ Invalid or corrupted link.");
+  // "sp_<id>" = protected special link (private channel join / url) instead of stored files
+  const isSpecial = typeof payload === "string" && payload.startsWith("sp_");
+  let sp = null;
+  let link = null;
+  if (isSpecial) {
+    sp = await kv.getSpecialLink(botData.bot_id, payload.slice(3));
+    if (!sp) return tg.send(msg.chat.id, "❌ Ye link ab available nahi hai.\n\n━━━━━━━━━━━━━━\n❌ This link is no longer available.");
+  } else {
+    link = await unpackLink(payload);
+    if (!link) return tg.send(msg.chat.id, "❌ Invalid or corrupted link.");
+  }
 
   // Force-sub check
   const forcesubList = await kv.listForcesubChannels(botData.bot_id);
@@ -179,6 +188,8 @@ async function cmdStart(msg, tg, botData, param, origin) {
   }
   if (fromPass && !anytime) await kv.setVerified(botData.bot_id, msg.from.id, settings.shortener_time ?? DEFAULT_SHORTENER_MIN);
 
+  if (isSpecial) return deliverSpecial(msg, tg, botData, sp);
+
   // Deliver
   const minutes = settings.autodelete_minutes ?? DEFAULT_AUTODELETE_MIN;
   const protect = !!settings.protect_content;
@@ -202,6 +213,112 @@ async function cmdStart(msg, tg, botData, param, origin) {
       : `✅ ${sentCount} file(s) delivered.`;
   if (total > MAX_BATCH_PER_REQUEST) footer += `\n\n⚠️ Batch me ${total} files thi, sirf pehli ${MAX_BATCH_PER_REQUEST} bheji gayi (platform limit). Baaki ke liye admin se poochein.`;
   return tg.send(msg.chat.id, footer);
+}
+
+// ---------- Special links: private channel join (join-request) / url ----------
+
+const SPECIAL_LINK_MIN = 10; // invite link validity (minutes)
+
+async function deliverSpecial(msg, tg, botData, sp) {
+  if (sp.type === "url") {
+    return tg.send(msg.chat.id, "✅ Verified! Niche button se open karein:\n\n━━━━━━━━━━━━━━\n✅ Verified! Open it with the button below:", {
+      protect_content: true,
+      reply_markup: { inline_keyboard: [[{ text: "🔗 Open Link", url: sp.url }]] },
+    });
+  }
+
+  // Channel: a join-request invite link made just for this user. The link name carries the user id,
+  // so no database write is needed; the join request handler compares it.
+  const res = await tgCall(botData.bot_token, "createChatInviteLink", {
+    chat_id: sp.chat_id,
+    name: `u${msg.from.id}`,
+    expire_date: Math.floor(Date.now() / 1000) + SPECIAL_LINK_MIN * 60,
+    creates_join_request: true,
+  });
+  if (!res.ok || !res.result?.invite_link) {
+    console.error("createChatInviteLink failed:", res.description);
+    if (await kv.claimNotice(botData.bot_id, "invitefail", 10)) {
+      await tg.send(botData.owner_id, `⚠️ <b>Channel invite link nahi ban paaya</b>\n\n${esc(sp.title || sp.chat_id)}: ${esc(res.description || "unknown error")}\n\nBot ko channel me admin banao (Invite Users permission ke saath).`).catch(() => {});
+    }
+    return tg.send(msg.chat.id, "⚠️ Abhi join link nahi ban paaya. Thodi der baad dobara try karein.\n\n━━━━━━━━━━━━━━\n⚠️ Couldn't create the join link right now. Please try again in a bit.");
+  }
+  return tg.send(
+    msg.chat.id,
+    `✅ Verified! Niche button se channel join karein.\n⏱ Ye link ${SPECIAL_LINK_MIN} minute me expire ho jaayega aur sirf aapke account ke liye hai.\n\n━━━━━━━━━━━━━━\n✅ Verified! Tap below to join the channel.\n⏱ This link expires in ${SPECIAL_LINK_MIN} minutes and works only for your account.`,
+    { protect_content: true, reply_markup: { inline_keyboard: [[{ text: "➕ Join Channel", url: res.result.invite_link }]] } }
+  );
+}
+
+// chat_join_request: approve only the user the link was made for, then kill the link.
+async function handleJoinRequest(req, tg, botData) {
+  const m = /^u(\d+)$/.exec(req.invite_link?.name || "");
+  if (!m) return; // not one of our links, leave it alone
+  const creator = req.invite_link?.creator?.id;
+  if (creator && String(creator) !== String(botData.bot_id)) return;
+  const known = (await kv.listSpecialLinks(botData.bot_id)).some((x) => x.type === "channel" && String(x.chat_id) === String(req.chat.id));
+  if (!known) return;
+
+  const base = { chat_id: req.chat.id, user_id: req.from.id };
+  if (Number(m[1]) !== Number(req.from.id)) {
+    await tgCall(botData.bot_token, "declineChatJoinRequest", base);
+    return;
+  }
+  const r = await tgCall(botData.bot_token, "approveChatJoinRequest", base);
+  await tgCall(botData.bot_token, "revokeChatInviteLink", { chat_id: req.chat.id, invite_link: req.invite_link.invite_link });
+  if (r.ok) await tg.send(req.user_chat_id || req.from.id, "✅ Aapki join request approve ho gayi. Channel me aapka swagat hai!\n\n━━━━━━━━━━━━━━\n✅ Your join request was approved. Welcome!").catch(() => {});
+}
+
+async function cmdSpecialLink(msg, tg, botData) {
+  await kv.setState(botData.bot_id, msg.from.id, { flow: "add_special" });
+  return tg.send(
+    msg.chat.id,
+    "🔐 <b>Special Link</b>\n\nPrivate channel se koi post <b>forward</b> karein, YA channel ki ID (<code>-100...</code>) bhejein, YA website ka URL bhejein.\n\nChannel ke liye bot ko wahan admin banana zaroori hai (Invite Users permission ke saath).\n\n━━━━━━━━━━━━━━\nForward a post from your private channel, OR send its ID, OR send a website URL. The bot must be admin there with the Invite Users permission."
+  );
+}
+
+async function saveSpecialChannel(msg, tg, botData, chatId) {
+  const chatRes = await tgCall(botData.bot_token, "getChat", { chat_id: chatId });
+  if (!chatRes.ok) return tg.send(msg.chat.id, `❌ Channel nahi mila: ${esc(chatRes.description || "")}\n\nBot ko pehle channel me admin banao.`);
+  const chat = chatRes.result;
+  const me = await tg.getChatMember(chat.id, botData.bot_id);
+  const st = me.ok ? me.result : null;
+  const isAdmin = st && (st.status === "creator" || (st.status === "administrator" && st.can_invite_users !== false));
+  if (!isAdmin) {
+    return tg.send(msg.chat.id, `❌ Bot is channel me admin nahi hai (ya Invite Users permission nahi hai).\n\nChannel: ${esc(chat.title || chat.id)}\nBot ko admin banao aur dobara /spiciallink karo.\n\n━━━━━━━━━━━━━━\n❌ The bot isn't an admin here (or lacks the Invite Users permission).`);
+  }
+  const id = await kv.addSpecialLink(botData.bot_id, { type: "channel", chat_id: chat.id, title: chat.title || String(chat.id) });
+  await kv.clearState(botData.bot_id, msg.from.id);
+  let text = `✅ <b>Special Link Ready</b>\nChannel: ${esc(chat.title || chat.id)}\n\nhttps://t.me/${botData.bot_username}?start=sp_${id}`;
+  if (chat.username) text += `\n\n⚠️ Ye channel PUBLIC hai (@${esc(chat.username)}). Koi bhi seedha join kar sakta hai. Protection ke liye channel ko private banao.`;
+  text += `\n\nTip: channel settings me "Restrict saving content" ON rakhein.`;
+  return tg.send(msg.chat.id, text);
+}
+
+async function handleSpecialInput(msg, tg, botData, input) {
+  const text = input.trim();
+  if (/^-100\d+$/.test(text)) return saveSpecialChannel(msg, tg, botData, Number(text));
+  if (/^https?:\/\/\S+$/i.test(text)) {
+    if (/^https?:\/\/t\.me\/(\+|joinchat\/)/i.test(text)) {
+      return tg.send(msg.chat.id, "❌ Invite link (t.me/+...) se protection nahi hoti, wo copy ho sakta hai. Channel ki post forward karein ya channel ID (-100...) bhejein.\n\n━━━━━━━━━━━━━━\n❌ Invite links can't be protected. Forward a post from the channel or send its ID instead.");
+    }
+    const id = await kv.addSpecialLink(botData.bot_id, { type: "url", url: text });
+    await kv.clearState(botData.bot_id, msg.from.id);
+    return tg.send(msg.chat.id, `✅ <b>Special Link Ready</b>\n\nhttps://t.me/${botData.bot_username}?start=sp_${id}\n\n(Website URL button se milega; use copy kiya ja sakta hai.)`);
+  }
+  return tg.send(msg.chat.id, "❌ Channel post forward karein, ya -100... wali channel ID, ya http(s) URL bhejein. Cancel: /cancel");
+}
+
+async function cmdSpecialLinks(msg, tg, botData) {
+  const list = await kv.listSpecialLinks(botData.bot_id);
+  if (!list.length) return tg.send(msg.chat.id, "Koi special link nahi hai. /spiciallink se banayein.");
+  const lines = list.map((x) => `• <code>${x.id}</code> | ${x.type === "channel" ? "📢 " + esc(x.title) : "🌐 " + esc(String(x.url).slice(0, 50))}\nhttps://t.me/${botData.bot_username}?start=sp_${x.id}`);
+  return tg.send(msg.chat.id, ["🔐 <b>Special Links:</b>", ...lines, "", "Delete: /delspecial &lt;id&gt;"].join("\n"), { disable_web_page_preview: true });
+}
+
+async function cmdDelSpecial(msg, tg, botData, args) {
+  if (!args[0]) return tg.send(msg.chat.id, "Usage: /delspecial <id>");
+  await kv.removeSpecialLink(botData.bot_id, args[0]);
+  return tg.send(msg.chat.id, "✅ Removed.");
 }
 
 // ---------- Admin: storage / forcesub ----------
@@ -284,6 +401,7 @@ async function handleForward(msg, tg, botData) {
     await kv.clearState(botData.bot_id, msg.from.id);
     return tg.send(msg.chat.id, `✅ Storage Added: ${esc(fwd.title)}`);
   }
+  if (state.flow === "add_special") return saveSpecialChannel(msg, tg, botData, fwd.chatId);
   if (state.flow === "add_forcesub") {
     const chatType = fwd.type === "channel" ? "channel" : "group";
     await kv.addForcesubChannel(botData.bot_id, fwd.chatId, fwd.title, chatType);
@@ -376,6 +494,7 @@ async function cmdHelp(msg, tg) {
       `/getlink /batch\n` +
       `/setautodelete\n` +
       `/enableshort /disableshort /addshort /deleteaccount /shorttime\n` +
+      `/spiciallink /spiciallinks /delspecial &lt;id&gt;\n` +
       `/broadcast (reply to a message)\n` +
       `/cancel`
   );
@@ -408,6 +527,11 @@ async function handleCallback(cb, tg, botData) {
 async function handleTextFsm(msg, tg, botData) {
   const state = await kv.getState(botData.bot_id, msg.from.id);
   if (!state) return false;
+
+  if (state.flow === "add_special" && msg.text && !msg.text.startsWith("/")) {
+    await handleSpecialInput(msg, tg, botData, msg.text);
+    return true;
+  }
 
   if (state.flow === "add_forcesub" && msg.text && !msg.text.startsWith("/")) {
     await kv.clearState(botData.bot_id, msg.from.id);
@@ -449,6 +573,7 @@ export async function handleCloneBot(update, botId, origin) {
 
 async function routeCloneUpdate(update, botData, tg, origin) {
   if (update.callback_query) return handleCallback(update.callback_query, tg, botData);
+  if (update.chat_join_request) return handleJoinRequest(update.chat_join_request, tg, botData);
 
   const msg = update.message;
   if (!msg || !msg.from) return;
@@ -480,6 +605,9 @@ async function routeCloneUpdate(update, botData, tg, origin) {
     if (cmd === "addshort") return cmdAddShort(msg, tg, botData);
     if (cmd === "deleteaccount") return cmdDeleteAccount(msg, tg, botData);
     if (cmd === "shorttime") return cmdShortTime(msg, tg);
+    if (cmd === "spiciallink" || cmd === "speciallink") return cmdSpecialLink(msg, tg, botData);
+    if (cmd === "spiciallinks" || cmd === "speciallinks") return cmdSpecialLinks(msg, tg, botData);
+    if (cmd === "delspecial") return cmdDelSpecial(msg, tg, botData, args);
     if (cmd === "broadcast") return cmdBroadcast(msg, tg, botData);
     return;
   }
