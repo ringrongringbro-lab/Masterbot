@@ -1,21 +1,50 @@
 import { api, esc, tgCall, getForwardInfo } from "./telegram.js";
-import { OWNERS, MAX_BATCH_PER_REQUEST, DEFAULT_AUTODELETE_MIN, DEFAULT_SHORTENER_MIN } from "./config.js";
+import { OWNERS, MAX_BATCH_PER_REQUEST, DEFAULT_AUTODELETE_MIN, DEFAULT_SHORTENER_MIN, PASS_TTL_MIN, MIN_SOLVE_SECONDS } from "./config.js";
 import { packLink, unpackLink, randomToken } from "./linkutil.js";
 import * as kv from "./kv.js";
 
 const isOwnerOf = (uid, botData) => Number(uid) === Number(botData.owner_id) || OWNERS.includes(Number(uid));
 
+// Returns { url, error }. Never throws. `error` is a short human-readable reason (no API key in it).
 async function fetchShortUrl(siteUrl, apiKey, destUrl) {
+  const domain = String(siteUrl).replace(/^https?:\/\//, "").split("/")[0];
+  const endpoint = `https://${domain}/api?api=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(destUrl)}`;
   try {
-    const domain = siteUrl.replace(/^https?:\/\//, "").split("/")[0];
-    const endpoint = `https://${domain}/api?api=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(destUrl)}`;
-    const r = await fetch(endpoint, { signal: AbortSignal.timeout(8000) });
-    if (!r.ok) return null;
-    const data = await r.json();
-    return data.shortenedUrl || data.short_url || data.short || null;
-  } catch {
-    return null;
+    const r = await fetch(endpoint, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; FileStoreBot/1.0)", Accept: "application/json, text/plain, */*" },
+      signal: AbortSignal.timeout(8000),
+      redirect: "follow",
+    });
+    const text = await r.text();
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch {}
+
+    if (data && typeof data === "object") {
+      const cand = data.shortenedUrl || data.shortened_url || data.short_url || data.shorturl || data.short || data.result?.full_short_link;
+      if (typeof cand === "string" && /^https?:\/\//i.test(cand) && cand !== destUrl) return { url: cand, error: null };
+      return { url: null, error: `${domain}: ${String(data.message || data.error || data.status || `HTTP ${r.status}`).slice(0, 120)}` };
+    }
+    const t = text.trim();
+    if (/^https?:\/\/\S+$/i.test(t) && t !== destUrl) return { url: t, error: null };
+    return { url: null, error: `${domain}: HTTP ${r.status}, non-JSON reply (${t.replace(/\s+/g, " ").slice(0, 80)})` };
+  } catch (e) {
+    return { url: null, error: `${domain}: ${String(e?.message || e).slice(0, 100)}` };
   }
+}
+
+// Tries up to 3 accounts (random order); with a single account it retries once.
+async function getShortUrlAny(accounts, destUrl) {
+  const shuffled = [...accounts].sort(() => Math.random() - 0.5);
+  const tries = shuffled.length === 1 ? [shuffled[0], shuffled[0]] : shuffled.slice(0, 3);
+  const errors = [];
+  for (const acc of tries) {
+    const res = await fetchShortUrl(acc.site_url, acc.api_key, destUrl);
+    if (res.url) return { url: res.url, errors };
+    errors.push(res.error);
+  }
+  return { url: null, errors };
 }
 
 async function buildJoinKeyboard(tg, missing, botUsername, startParam) {
@@ -50,9 +79,25 @@ async function cmdStart(msg, tg, botData, param, origin) {
   let payload = param;
   let fromPass = false;
   if (param.startsWith("pass_")) {
-    const passData = await kv.getPassToken(param.slice(5));
+    const tokenId = param.slice(5);
+    const passData = await kv.getPassToken(tokenId);
     if (!passData) return tg.send(msg.chat.id, "❌ Verification link expired. Please open the original link again.");
-    await kv.deletePassToken(param.slice(5));
+
+    // New-style tokens (created together with the hold-button verify page).
+    // Old in-flight tokens (no needs_hold flag) keep working as before.
+    if (passData.needs_hold) {
+      if (Number(passData.user_id) !== Number(msg.from.id) || String(passData.bot_id) !== String(botData.bot_id)) {
+        return tg.send(msg.chat.id, "❌ Ye verification link aapke account ke liye nahi hai. Original link kholkar khud verify karein.\n\n━━━━━━━━━━━━━━\n❌ This verification link isn't for your account. Open the original link and verify yourself.");
+      }
+      if (!passData.held) {
+        return tg.send(msg.chat.id, "⚠️ Verification complete nahi hui. Shortener solve karke aakhri page par button hold karein.\n\n━━━━━━━━━━━━━━\n⚠️ Verification not completed. Solve the shortener and hold the button on the last page.");
+      }
+      if (passData.held_at - passData.created_at < MIN_SOLVE_SECONDS * 1000) {
+        await kv.deletePassToken(tokenId);
+        return tg.send(msg.chat.id, "❌ Verification bahut jaldi hui — shortener properly solve karein. Original link se dobara try karein.\n\n━━━━━━━━━━━━━━\n❌ Verified too fast — please solve the shortener properly and try the original link again.");
+      }
+    }
+    await kv.deletePassToken(tokenId);
     payload = passData.payload;
     fromPass = true;
   }
@@ -74,22 +119,31 @@ async function cmdStart(msg, tg, botData, param, origin) {
 
   // Shortener check
   const settings = await kv.getSettings(botData.bot_id);
+  const anytime = Number(settings.shortener_time) === 0; // "Anytime" = shortener on every click
   if (!fromPass && settings.shortener_enabled) {
     const accounts = await kv.listShorteners(botData.bot_id);
-    if (accounts.length && !(await kv.isVerified(botData.bot_id, msg.from.id))) {
-      const acc = accounts[Math.floor(Math.random() * accounts.length)];
+    if (accounts.length && (anytime || !(await kv.isVerified(botData.bot_id, msg.from.id)))) {
       const pToken = randomToken();
-      await kv.savePassToken(pToken, { payload }, 15);
-      const destUrl = `https://t.me/${botData.bot_username}?start=pass_${pToken}`;
-      const shortUrl = await fetchShortUrl(acc.site_url, acc.api_key, destUrl);
-      if (shortUrl) {
+      // The shortener's destination is OUR hold-button page, not the t.me link,
+      // so a bypass bot never gets the real Telegram link.
+      const verifyUrl = `${origin}/verify?t=${pToken}`;
+      await kv.savePassToken(pToken, { payload, bot_id: botData.bot_id, user_id: msg.from.id, created_at: Date.now(), needs_hold: true }, PASS_TTL_MIN);
+      const res = await getShortUrlAny(accounts, verifyUrl);
+      if (res.url) {
         return tg.send(msg.chat.id, "🔒 Files unlock karne ke liye niche wala link solve karein:\n\n━━━━━━━━━━━━━━\n🔒 Solve the link below to unlock your files:", {
-          reply_markup: { inline_keyboard: [[{ text: "🔗 Unlock Files", url: shortUrl }]] },
+          reply_markup: { inline_keyboard: [[{ text: "🔗 Unlock Files", url: res.url }]] },
         });
       }
+      // Fail CLOSED: never hand out files when the shortener couldn't be generated.
+      await kv.deletePassToken(pToken);
+      console.error("Shortener failed:", res.errors.join(" | "));
+      if (await kv.claimNotice(botData.bot_id, "shortfail", 10)) {
+        await tg.send(botData.owner_id, `⚠️ <b>Shortener link nahi ban raha</b>\n\n${res.errors.map((e) => `• ${esc(e)}`).join("\n")}\n\nAPI key / site URL check karein ya /disableshort karein. (Ye alert 10 min me ek hi baar aayega.)`).catch(() => {});
+      }
+      return tg.send(msg.chat.id, "⚠️ Abhi link generate nahi ho paaya. Thodi der baad dobara try karein.\n\n━━━━━━━━━━━━━━\n⚠️ Couldn't generate the unlock link right now. Please try again in a bit.");
     }
   }
-  if (fromPass) await kv.setVerified(botData.bot_id, msg.from.id, settings.shortener_time || DEFAULT_SHORTENER_MIN);
+  if (fromPass && !anytime) await kv.setVerified(botData.bot_id, msg.from.id, settings.shortener_time ?? DEFAULT_SHORTENER_MIN);
 
   // Deliver
   const minutes = settings.autodelete_minutes ?? DEFAULT_AUTODELETE_MIN;
@@ -264,11 +318,11 @@ async function cmdDeleteAccount(msg, tg, botData) {
 }
 
 async function cmdShortTime(msg, tg) {
-  const options = { "30m": 30, "1h": 60, "5h": 300, "9h": 540, "16h": 960 };
+  const options = { "Anytime": 0, "30m": 30, "1h": 60, "5h": 300, "9h": 540, "16h": 960 };
   const keys = Object.keys(options);
   const buttons = [];
-  for (let i = 0; i < keys.length; i += 2) buttons.push(keys.slice(i, i + 2).map((k) => ({ text: k, callback_data: `stime_${options[k]}` })));
-  return tg.send(msg.chat.id, "Shortener validity duration chunein:", { reply_markup: { inline_keyboard: buttons } });
+  for (let i = 0; i < keys.length; i += 2) buttons.push(keys.slice(i, i + 2).map((k) => ({ text: k === "Anytime" ? "♾ Anytime (har click)" : k, callback_data: `stime_${options[k]}` })));
+  return tg.send(msg.chat.id, "Shortener validity duration chunein:\n\n♾ <b>Anytime</b> = har link click par shortener aayega.", { reply_markup: { inline_keyboard: buttons } });
 }
 
 async function cmdBroadcast(msg, tg, botData) {
@@ -310,7 +364,7 @@ async function handleCallback(cb, tg, botData) {
   if (cb.data.startsWith("stime_")) {
     const minutes = parseInt(cb.data.split("_")[1], 10);
     await kv.updateSetting(botData.bot_id, "shortener_time", minutes);
-    await tg.edit(cb.message.chat.id, cb.message.message_id, `✅ Shortener validity set to ${minutes} minutes.`);
+    await tg.edit(cb.message.chat.id, cb.message.message_id, minutes === 0 ? "✅ Shortener validity: Anytime (har click par shortener aayega)." : `✅ Shortener validity set to ${minutes} minutes.`);
     return tg.answerCb(cb.id, "Saved");
   }
 }
