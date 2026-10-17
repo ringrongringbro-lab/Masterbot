@@ -172,6 +172,22 @@ export async function deletePassToken(token) {
   await kvDelete(k("passes", token));
 }
 
+// ---------- Special links (protected channel invites / urls) ----------
+export async function addSpecialLink(botId, data) {
+  const id = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+  await kvPut(k("spl", botId, id), { id, ...data, created_at: Date.now() });
+  return id;
+}
+export async function getSpecialLink(botId, id) {
+  return await kvGet(k("spl", botId, id));
+}
+export async function listSpecialLinks(botId) {
+  return await listValues(k("spl", botId, ""));
+}
+export async function removeSpecialLink(botId, id) {
+  await kvDelete(k("spl", botId, id));
+}
+
 // One-shot throttle: returns true only the first time within ttlMinutes (used to avoid spamming admin).
 export async function claimNotice(botId, key, ttlMinutes = 10) {
   const kk = k("notice", botId, key);
