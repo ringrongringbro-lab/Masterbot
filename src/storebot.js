@@ -5,6 +5,39 @@ import * as kv from "./kv.js";
 
 const isOwnerOf = (uid, botData) => Number(uid) === Number(botData.owner_id) || OWNERS.includes(Number(uid));
 
+// ShrtFly/GPLinks-style APIs name the short-link field differently. Check known names first,
+// then scan every string in the reply for something that looks like a link (not our own destination).
+function findShortLink(data, destUrl) {
+  const norm = (v) => {
+    if (typeof v !== "string") return null;
+    let x = v.trim();
+    if (!x || x === destUrl || x.includes("/verify?t=")) return null;
+    if (x.startsWith("//")) x = "https:" + x;
+    else if (!/^https?:\/\//i.test(x)) {
+      if (!/^[\w-]+(\.[\w-]+)+\/\S+$/.test(x)) return null;
+      x = "https://" + x;
+    }
+    return /^https?:\/\/[^\s/]+\.[^\s/]+\/\S+/.test(x) ? x : null;
+  };
+  const known = ["shortenedUrl", "shortened_url", "short_url", "shorturl", "short", "shortlink", "short_link", "link", "result_url", "full_short_link"];
+  for (const k of known) {
+    const n = norm(data[k]);
+    if (n) return n;
+  }
+  const walk = (o, depth) => {
+    if (depth > 3 || o == null) return null;
+    if (typeof o === "string") return norm(o);
+    if (typeof o === "object") {
+      for (const v of Object.values(o)) {
+        const n = walk(v, depth + 1);
+        if (n) return n;
+      }
+    }
+    return null;
+  };
+  return walk(data, 0);
+}
+
 // Returns { url, error }. Never throws. `error` is a short human-readable reason (no API key in it).
 async function fetchShortUrl(siteUrl, apiKey, destUrl) {
   const domain = String(siteUrl).replace(/^https?:\/\//, "").split("/")[0];
@@ -22,9 +55,10 @@ async function fetchShortUrl(siteUrl, apiKey, destUrl) {
     } catch {}
 
     if (data && typeof data === "object") {
-      const cand = data.shortenedUrl || data.shortened_url || data.short_url || data.shorturl || data.short || data.result?.full_short_link;
-      if (typeof cand === "string" && /^https?:\/\//i.test(cand) && cand !== destUrl) return { url: cand, error: null };
-      return { url: null, error: `${domain}: ${String(data.message || data.error || data.status || `HTTP ${r.status}`).slice(0, 120)}` };
+      const found = findShortLink(data, destUrl);
+      if (found) return { url: found, error: null };
+      const keys = Object.keys(data).join(",").slice(0, 80);
+      return { url: null, error: `${domain}: ${String(data.message || data.error || data.status || `HTTP ${r.status}`).slice(0, 80)} (no link field; keys: ${keys})` };
     }
     const t = text.trim();
     if (/^https?:\/\/\S+$/i.test(t) && t !== destUrl) return { url: t, error: null };
